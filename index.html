@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mesh Viewer</title>
+<script type="importmap">
+{"imports":{
+  "three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+}}
+</script>
+<style>
+:root{--bg:#f3f4f1;--panel:#fff;--ink:#1b1f1d;--mute:#6b736f;--line:#d9dcd7;--acc:#0f766e;--view:#e7e9e4}
+@media (prefers-color-scheme:dark){:root{--bg:#141716;--panel:#1d2120;--ink:#e8ebe9;--mute:#8d9692;--line:#2f3533;--acc:#2dd4bf;--view:#0f1211}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+header{display:flex;gap:8px;align-items:center;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line)}
+header h1{font-size:16px;margin:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+button{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 12px;cursor:pointer}
+button.on,button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+button:focus-visible,input:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+main{flex:1;min-height:0;position:relative}
+#viewer{position:absolute;inset:0;background:var(--view)}
+#viewer canvas{display:block;width:100%;height:100%;touch-action:none}
+#info{position:absolute;left:10px;bottom:10px;right:10px;font-size:12px;color:var(--mute);pointer-events:none}
+#tools{position:absolute;right:10px;top:10px;display:flex;flex-direction:column;gap:6px}
+#tools button{padding:6px 10px;font-size:13px}
+#empty{position:absolute;inset:0;display:grid;place-items:center;color:var(--mute);text-align:center;padding:24px;pointer-events:none}
+#sheet{position:fixed;inset:0;background:var(--bg);z-index:5;display:none;flex-direction:column;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+#sheet.open{display:flex}
+.bar{display:flex;gap:8px;padding:10px 12px;background:var(--panel);border-bottom:1px solid var(--line)}
+.bar input{flex:1;min-width:0;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px 10px}
+#list{flex:1;overflow:auto;margin:0;padding:0;list-style:none}
+#list li{display:flex;justify-content:space-between;gap:12px;padding:13px 14px;border-bottom:1px solid var(--line);cursor:pointer}
+#list li:active{background:var(--panel)}
+#list .n{overflow:hidden;text-overflow:ellipsis;word-break:break-all}
+#list .d{color:var(--mute);font-size:12px;display:block}
+#list .s{color:var(--mute);font-size:12px;white-space:nowrap}
+#msg{padding:14px;color:var(--mute)}
+#cfg{display:none;padding:10px 12px;background:var(--panel);border-bottom:1px solid var(--line);gap:8px}
+#cfg.open{display:flex}
+#cfg input{flex:1;min-width:0;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px 10px}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Mesh Viewer</h1>
+  <button id="openList" class="primary">Dateien</button>
+</header>
+<main>
+  <div id="viewer"></div>
+  <div id="empty">Tippe auf „Dateien“ und wähle ein Modell.</div>
+  <div id="tools" hidden>
+    <button id="bWire">Gitter</button>
+    <button id="bRot" class="on">Drehen</button>
+    <button id="bReset">Ansicht</button>
+  </div>
+  <div id="info"></div>
+</main>
+
+<div id="sheet">
+  <div class="bar">
+    <input id="q" type="search" placeholder="Suchen…" aria-label="Dateien suchen">
+    <button id="bRepo">Repo</button>
+    <button id="bClose">Schließen</button>
+  </div>
+  <div id="cfg">
+    <input id="repoIn" placeholder="benutzer/repository" autocapitalize="none" autocomplete="off">
+    <input id="brIn" placeholder="Branch (leer = Standard)" style="max-width:40%" autocapitalize="none">
+    <button id="bGo" class="primary">Laden</button>
+  </div>
+  <ul id="list"></ul>
+  <div id="msg"></div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+import {STLLoader} from 'three/addons/loaders/STLLoader.js';
+import {OBJLoader} from 'three/addons/loaders/OBJLoader.js';
+import {PLYLoader} from 'three/addons/loaders/PLYLoader.js';
+import {ThreeMFLoader} from 'three/addons/loaders/3MFLoader.js';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+
+const EXT = ['stl','obj','ply','3mf','glb','gltf'];
+const $ = id => document.getElementById(id);
+const qs = new URLSearchParams(location.search);
+
+/* ---- Repo-Erkennung: ?repo=, gespeichert, oder aus der github.io-URL ---- */
+function guessRepo(){
+  const m = location.hostname.match(/^(.+)\.github\.io$/);
+  if(!m) return '';
+  const first = location.pathname.split('/').filter(Boolean)[0];
+  return m[1] + '/' + (first && !first.includes('.') ? first : m[1] + '.github.io');
+}
+let store = {};
+try { store = JSON.parse(localStorage.getItem('meshviewer') || '{}'); } catch(e){}
+let repo = qs.get('repo') || store.repo || guessRepo();
+let branch = qs.get('branch') || store.branch || '';
+let files = [];
+
+/* ---- 3D-Szene ---- */
+const el = $('viewer');
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+el.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, 1, .01, 10000);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.autoRotateSpeed = 2;
+scene.add(new THREE.HemisphereLight(0xffffff, 0x556066, 1.1));
+const key = new THREE.DirectionalLight(0xffffff, 1.6); scene.add(key); scene.add(key.target);
+const fill = new THREE.DirectionalLight(0xffffff, .5); fill.position.set(-1,-.5,-1); scene.add(fill);
+let grid, current, home = {pos:new THREE.Vector3(), tgt:new THREE.Vector3()};
+let wire = false;
+
+function resize(){
+  const w = el.clientWidth, h = el.clientHeight;
+  renderer.setSize(w, h, false); camera.aspect = w/h; camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(el); resize();
+renderer.setAnimationLoop(() => {
+  controls.update();
+  key.position.copy(camera.position).add(new THREE.Vector3(1,2,1).multiplyScalar(.2));
+  renderer.render(scene, camera);
+});
+
+function matFor(o){
+  const m = new THREE.MeshStandardMaterial({color:0x9fb4ad, roughness:.55, metalness:.1, side:THREE.DoubleSide, flatShading:!o});
+  return m;
+}
+
+function show(obj, name, size){
+  if(current) scene.remove(current);
+  if(grid) scene.remove(grid);
+  current = obj;
+  obj.traverse(c => { if(c.isMesh){ if(!c.material || obj.userData.plain) c.material = matFor(); c.material.wireframe = wire; } });
+  // Z-up (CAD/Druck) -> Y-up
+  const holder = new THREE.Group(); holder.add(obj);
+  if(!obj.userData.yUp) holder.rotation.x = -Math.PI/2;
+  scene.add(holder); current = holder;
+  const box = new THREE.Box3().setFromObject(holder);
+  const sz = box.getSize(new THREE.Vector3()), ctr = box.getCenter(new THREE.Vector3());
+  holder.position.sub(new THREE.Vector3(ctr.x, box.min.y, ctr.z));
+  box.setFromObject(holder);
+  const r = Math.max(sz.x, sz.y, sz.z) || 1;
+  grid = new THREE.GridHelper(r*2.5, 20, 0x888888, 0x999999);
+  grid.material.opacity = .35; grid.material.transparent = true; scene.add(grid);
+  const d = r * 2.1;
+  home.pos.set(d*.8, d*.7, d*.9); home.tgt.set(0, sz.y/2, 0);
+  camera.near = r/200; camera.far = r*100; camera.updateProjectionMatrix();
+  resetView();
+  const dims = [sz.x, sz.z, sz.y].map(v => v.toFixed(1)).join(' × ');
+  let tris = 0; holder.traverse(c => { if(c.isMesh){ const g=c.geometry; tris += (g.index ? g.index.count : g.attributes.position.count)/3; } });
+  $('info').textContent = `${dims} mm · ${Math.round(tris).toLocaleString('de-CH')} Dreiecke${size?' · '+size:''}`;
+  $('title').textContent = name;
+  $('empty').hidden = true; $('tools').hidden = false;
+}
+function resetView(){ camera.position.copy(home.pos); controls.target.copy(home.tgt); controls.update(); }
+
+/* ---- Laden ---- */
+async function loadFile(f){
+  closeSheet();
+  $('empty').hidden = false; $('empty').textContent = 'Lade ' + f.path + '…'; $('tools').hidden = true;
+  try{
+    const url = `https://raw.githubusercontent.com/${repo}/${branch}/${f.path.split('/').map(encodeURIComponent).join('/')}`;
+    const res = await fetch(url);
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const buf = await res.arrayBuffer();
+    const ext = f.path.split('.').pop().toLowerCase();
+    let obj;
+    if(ext === 'stl'){ const g = new STLLoader().parse(buf); g.computeVertexNormals(); obj = new THREE.Mesh(g, matFor()); }
+    else if(ext === 'ply'){ const g = new PLYLoader().parse(buf); g.computeVertexNormals(); obj = new THREE.Mesh(g, matFor()); }
+    else if(ext === 'obj'){ obj = new OBJLoader().parse(new TextDecoder().decode(buf)); obj.userData.plain = true; }
+    else if(ext === '3mf'){ obj = new ThreeMFLoader().parse(buf); obj.userData.plain = true; }
+    else { obj = (await new GLTFLoader().parseAsync(buf, '')).scene; obj.userData.yUp = true; }
+    show(obj, f.path.split('/').pop(), f.size ? fmt(f.size) : '');
+  }catch(e){
+    $('empty').hidden = false; $('empty').textContent = 'Fehler beim Laden: ' + e.message;
+  }
+}
+const fmt = b => b > 1e6 ? (b/1e6).toFixed(1)+' MB' : Math.max(1,Math.round(b/1e3))+' kB';
+
+/* ---- Dateiliste ---- */
+async function loadList(){
+  $('list').innerHTML = ''; files = [];
+  if(!repo){ $('msg').textContent = 'Gib oben ein Repository an (benutzer/repository).'; $('cfg').classList.add('open'); return; }
+  $('msg').textContent = 'Lade Dateiliste…';
+  try{
+    if(!branch){
+      const r = await fetch(`https://api.github.com/repos/${repo}`);
+      if(!r.ok) throw new Error(r.status === 404 ? 'Repository nicht gefunden (muss öffentlich sein)' : 'HTTP ' + r.status);
+      branch = (await r.json()).default_branch;
+    }
+    const t = await fetch(`https://api.github.com/repos/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`);
+    if(!t.ok) throw new Error('Branch nicht gefunden oder API-Limit erreicht (HTTP ' + t.status + ')');
+    const j = await t.json();
+    files = j.tree.filter(n => n.type === 'blob' && EXT.includes(n.path.split('.').pop().toLowerCase()))
+                  .sort((a,b) => a.path.localeCompare(b.path, 'de', {numeric:true}));
+    try{ localStorage.setItem('meshviewer', JSON.stringify({repo, branch})); }catch(e){}
+    $('msg').textContent = files.length ? '' : 'Keine Mesh-Dateien (' + EXT.join(', ') + ') gefunden.';
+    $('repoIn').value = repo; $('brIn').value = branch;
+    renderList();
+  }catch(e){ $('msg').textContent = e.message; $('cfg').classList.add('open'); }
+}
+function renderList(){
+  const q = $('q').value.trim().toLowerCase();
+  const ul = $('list'); ul.innerHTML = '';
+  for(const f of files){
+    if(q && !f.path.toLowerCase().includes(q)) continue;
+    const i = f.path.lastIndexOf('/');
+    const li = document.createElement('li');
+    li.innerHTML = '<span class="n"></span><span class="s"></span>';
+    const n = li.firstChild;
+    n.textContent = f.path.slice(i+1);
+    if(i > 0){ const d = document.createElement('span'); d.className = 'd'; d.textContent = f.path.slice(0,i); n.appendChild(d); }
+    li.lastChild.textContent = f.size ? fmt(f.size) : '';
+    li.onclick = () => loadFile(f);
+    ul.appendChild(li);
+  }
+}
+const openSheet = () => $('sheet').classList.add('open');
+const closeSheet = () => $('sheet').classList.remove('open');
+
+$('openList').onclick = openSheet;
+$('bClose').onclick = closeSheet;
+$('q').oninput = renderList;
+$('bRepo').onclick = () => $('cfg').classList.toggle('open');
+$('bGo').onclick = () => {
+  repo = $('repoIn').value.trim().replace(/^https?:\/\/github\.com\//,'').replace(/\.git$/,'').replace(/\/$/,'');
+  branch = $('brIn').value.trim(); loadList();
+};
+$('bWire').onclick = e => { wire = !wire; e.target.classList.toggle('on', wire); current && current.traverse(c => { if(c.isMesh) c.material.wireframe = wire; }); };
+$('bRot').onclick = e => { controls.autoRotate = !controls.autoRotate; e.target.classList.toggle('on', controls.autoRotate); };
+$('bReset').onclick = resetView;
+controls.autoRotate = true;
+
+$('repoIn').value = repo; $('brIn').value = branch;
+loadList().then(() => {
+  const f = qs.get('file');
+  if(f){ const hit = files.find(x => x.path === f); if(hit) loadFile(hit); }
+  else if(files.length) openSheet();
+});
+</script>
+</body>
+</html>
