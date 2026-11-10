@@ -91,7 +91,7 @@ const qs = new URLSearchParams(location.search);
 /* ---- Repo-Erkennung: ?repo=, gespeichert, oder aus der github.io-URL ---- */
 function guessRepo(){
   const m = location.hostname.match(/^(.+)\.github\.io$/);
-  if(!m) return '';
+  if(!m) return 'hoedii/stlviewer'; // Fallback für lokales Testen / direkte Links
   const first = location.pathname.split('/').filter(Boolean)[0];
   return m[1] + '/' + (first && !first.includes('.') ? first : m[1] + '.github.io');
 }
@@ -162,13 +162,18 @@ function show(obj, name, size){
 function resetView(){ camera.position.copy(home.pos); controls.target.copy(home.tgt); controls.update(); }
 
 /* ---- Laden ---- */
-async function loadFile(f){
+async function loadFile(f, updateUrl = true){
   closeSheet();
   $('empty').hidden = false; $('empty').textContent = 'Lade ' + f.path + '…'; $('tools').hidden = true;
   try{
-    const url = `https://raw.githubusercontent.com/${repo}/${branch}/${f.path.split('/').map(encodeURIComponent).join('/')}`;
-    const res = await fetch(url);
-    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const encodedPath = f.path.split('/').map(encodeURIComponent).join('/');
+    const branchesToTry = branch ? [branch] : ['main', 'master'];
+    let res;
+    for(const b of branchesToTry){
+      res = await fetch(`https://raw.githubusercontent.com/${repo}/${b}/${encodedPath}`);
+      if(res.ok){ branch = b; break; }
+    }
+    if(!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : 'Fehler'));
     const buf = await res.arrayBuffer();
     const ext = f.path.split('.').pop().toLowerCase();
     let obj;
@@ -177,9 +182,19 @@ async function loadFile(f){
     else if(ext === 'obj'){ obj = new OBJLoader().parse(new TextDecoder().decode(buf)); obj.userData.plain = true; }
     else if(ext === '3mf'){ obj = new ThreeMFLoader().parse(buf); obj.userData.plain = true; }
     else { obj = (await new GLTFLoader().parseAsync(buf, '')).scene; obj.userData.yUp = true; }
-    show(obj, f.path.split('/').pop(), f.size ? fmt(f.size) : '');
+    
+    const sizeStr = f.size ? fmt(f.size) : fmt(buf.byteLength);
+    show(obj, f.path.split('/').pop(), sizeStr);
+
+    if(updateUrl){
+      const newUrl = new URL(location.href);
+      newUrl.searchParams.set('file', f.path);
+      history.replaceState(null, '', newUrl);
+    }
+    return true;
   }catch(e){
     $('empty').hidden = false; $('empty').textContent = 'Fehler beim Laden: ' + e.message;
+    return false;
   }
 }
 const fmt = b => b > 1e6 ? (b/1e6).toFixed(1)+' MB' : Math.max(1,Math.round(b/1e3))+' kB';
@@ -218,7 +233,7 @@ function renderList(){
     n.textContent = f.path.slice(i+1);
     if(i > 0){ const d = document.createElement('span'); d.className = 'd'; d.textContent = f.path.slice(0,i); n.appendChild(d); }
     li.lastChild.textContent = f.size ? fmt(f.size) : '';
-    li.onclick = () => loadFile(f);
+    li.onclick = () => loadFile(f, true);
     ul.appendChild(li);
   }
 }
@@ -239,11 +254,27 @@ $('bReset').onclick = resetView;
 controls.autoRotate = true;
 
 $('repoIn').value = repo; $('brIn').value = branch;
-loadList().then(() => {
-  const f = qs.get('file');
-  if(f){ const hit = files.find(x => x.path === f); if(hit) loadFile(hit); }
-  else if(files.length) openSheet();
-});
+
+/* ---- Startlogik: Direktladen per ?file=... oder Dateiliste öffnen ---- */
+const initialFile = qs.get('file');
+if(initialFile){
+  // Versucht die Datei direkt zu laden (ohne auf die GitHub-API-Dateiliste zu warten)
+  loadFile({path: initialFile}, false).then(ok => {
+    loadList().then(() => {
+      // Falls die Datei in einem Unterordner lag oder Groß-/Kleinschreibung abwich:
+      if(!ok){
+        const search = initialFile.toLowerCase();
+        const hit = files.find(x => x.path.toLowerCase() === search || x.path.split('/').pop().toLowerCase() === search);
+        if(hit) loadFile(hit, false);
+        else if(files.length) openSheet();
+      }
+    });
+  });
+} else {
+  loadList().then(() => {
+    if(files.length) openSheet();
+  });
+}
 </script>
 </body>
 </html>
