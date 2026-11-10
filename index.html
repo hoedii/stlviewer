@@ -14,6 +14,7 @@
 :root{--bg:#f3f4f1;--panel:#fff;--ink:#1b1f1d;--mute:#6b736f;--line:#d9dcd7;--acc:#0f766e;--view:#e7e9e4}
 @media (prefers-color-scheme:dark){:root{--bg:#141716;--panel:#1d2120;--ink:#e8ebe9;--mute:#8d9692;--line:#2f3533;--acc:#2dd4bf;--view:#0f1211}}
 *{box-sizing:border-box}
+[hidden]{display:none !important}
 html,body{height:100%;margin:0}
 body{background:var(--bg);color:var(--ink);font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
 header{display:flex;gap:8px;align-items:center;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line)}
@@ -88,10 +89,9 @@ const EXT = ['stl','obj','ply','3mf','glb','gltf'];
 const $ = id => document.getElementById(id);
 const qs = new URLSearchParams(location.search);
 
-/* ---- Repo-Erkennung: ?repo=, gespeichert, oder aus der github.io-URL ---- */
 function guessRepo(){
   const m = location.hostname.match(/^(.+)\.github\.io$/);
-  if(!m) return 'hoedii/stlviewer'; // Fallback für lokales Testen / direkte Links
+  if(!m) return 'hoedii/stlviewer';
   const first = location.pathname.split('/').filter(Boolean)[0];
   return m[1] + '/' + (first && !first.includes('.') ? first : m[1] + '.github.io');
 }
@@ -129,8 +129,7 @@ renderer.setAnimationLoop(() => {
 });
 
 function matFor(o){
-  const m = new THREE.MeshStandardMaterial({color:0x9fb4ad, roughness:.55, metalness:.1, side:THREE.DoubleSide, flatShading:!o});
-  return m;
+  return new THREE.MeshStandardMaterial({color:0x9fb4ad, roughness:.55, metalness:.1, side:THREE.DoubleSide, flatShading:!o});
 }
 
 function show(obj, name, size){
@@ -138,7 +137,6 @@ function show(obj, name, size){
   if(grid) scene.remove(grid);
   current = obj;
   obj.traverse(c => { if(c.isMesh){ if(!c.material || obj.userData.plain) c.material = matFor(); c.material.wireframe = wire; } });
-  // Z-up (CAD/Druck) -> Y-up
   const holder = new THREE.Group(); holder.add(obj);
   if(!obj.userData.yUp) holder.rotation.x = -Math.PI/2;
   scene.add(holder); current = holder;
@@ -157,43 +155,49 @@ function show(obj, name, size){
   let tris = 0; holder.traverse(c => { if(c.isMesh){ const g=c.geometry; tris += (g.index ? g.index.count : g.attributes.position.count)/3; } });
   $('info').textContent = `${dims} mm · ${Math.round(tris).toLocaleString('de-CH')} Dreiecke${size?' · '+size:''}`;
   $('title').textContent = name;
-  $('empty').hidden = true; $('tools').hidden = false;
+  $('empty').textContent = '';
+  $('empty').hidden = true;
+  $('tools').hidden = false;
 }
 function resetView(){ camera.position.copy(home.pos); controls.target.copy(home.tgt); controls.update(); }
 
 /* ---- Laden ---- */
-async function loadFile(f, updateUrl = true){
+async function loadFile(f, updateUrl = true, quiet = false){
   closeSheet();
   $('empty').hidden = false; $('empty').textContent = 'Lade ' + f.path + '…'; $('tools').hidden = true;
   try{
-    const encodedPath = f.path.split('/').map(encodeURIComponent).join('/');
+    const pathsToTry = f.path.includes('/') ? [f.path] : [f.path, 'modelle/' + f.path];
     const branchesToTry = branch ? [branch] : ['main', 'master'];
-    let res;
-    for(const b of branchesToTry){
-      res = await fetch(`https://raw.githubusercontent.com/${repo}/${b}/${encodedPath}`);
-      if(res.ok){ branch = b; break; }
+    let res, usedPath = f.path;
+    outer: for(const p of pathsToTry){
+      const enc = p.split('/').map(encodeURIComponent).join('/');
+      for(const b of branchesToTry){
+        const r = await fetch(`https://raw.githubusercontent.com/${repo}/${b}/${enc}`);
+        if(r.ok){ res = r; branch = b; usedPath = p; break outer; }
+      }
     }
-    if(!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : 'Fehler'));
+    if(!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : '404'));
     const buf = await res.arrayBuffer();
-    const ext = f.path.split('.').pop().toLowerCase();
+    const ext = usedPath.split('.').pop().toLowerCase();
     let obj;
     if(ext === 'stl'){ const g = new STLLoader().parse(buf); g.computeVertexNormals(); obj = new THREE.Mesh(g, matFor()); }
     else if(ext === 'ply'){ const g = new PLYLoader().parse(buf); g.computeVertexNormals(); obj = new THREE.Mesh(g, matFor()); }
     else if(ext === 'obj'){ obj = new OBJLoader().parse(new TextDecoder().decode(buf)); obj.userData.plain = true; }
     else if(ext === '3mf'){ obj = new ThreeMFLoader().parse(buf); obj.userData.plain = true; }
     else { obj = (await new GLTFLoader().parseAsync(buf, '')).scene; obj.userData.yUp = true; }
-    
-    const sizeStr = f.size ? fmt(f.size) : fmt(buf.byteLength);
-    show(obj, f.path.split('/').pop(), sizeStr);
 
+    show(obj, usedPath.split('/').pop(), f.size ? fmt(f.size) : fmt(buf.byteLength));
     if(updateUrl){
-      const newUrl = new URL(location.href);
-      newUrl.searchParams.set('file', f.path);
-      history.replaceState(null, '', newUrl);
+      const u = new URL(location.href);
+      u.searchParams.set('file', usedPath);
+      history.replaceState(null, '', u);
     }
     return true;
   }catch(e){
-    $('empty').hidden = false; $('empty').textContent = 'Fehler beim Laden: ' + e.message;
+    if(!quiet){
+      $('empty').hidden = false;
+      $('empty').textContent = 'Fehler beim Laden: ' + e.message;
+    }
     return false;
   }
 }
@@ -255,18 +259,18 @@ controls.autoRotate = true;
 
 $('repoIn').value = repo; $('brIn').value = branch;
 
-/* ---- Startlogik: Direktladen per ?file=... oder Dateiliste öffnen ---- */
 const initialFile = qs.get('file');
 if(initialFile){
-  // Versucht die Datei direkt zu laden (ohne auf die GitHub-API-Dateiliste zu warten)
-  loadFile({path: initialFile}, false).then(ok => {
+  loadFile({path: initialFile}, true, true).then(ok => {
     loadList().then(() => {
-      // Falls die Datei in einem Unterordner lag oder Groß-/Kleinschreibung abwich:
       if(!ok){
-        const search = initialFile.toLowerCase();
-        const hit = files.find(x => x.path.toLowerCase() === search || x.path.split('/').pop().toLowerCase() === search);
-        if(hit) loadFile(hit, false);
-        else if(files.length) openSheet();
+        const s = initialFile.toLowerCase();
+        const hit = files.find(x => x.path.toLowerCase() === s || x.path.split('/').pop().toLowerCase() === s);
+        if(hit) loadFile(hit, true, false);
+        else {
+          $('empty').hidden = false;
+          $('empty').textContent = 'Modell "' + initialFile + '" nicht gefunden.';
+        }
       }
     });
   });
